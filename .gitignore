@@ -1,0 +1,39 @@
+# Python bytecode / caches
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.hypothesis/
+
+# Packaging / build artifacts (pip install -e . creates src/pfair.egg-info)
+*.egg-info/
+build/
+dist/
+.eggs/
+
+# Virtual environments
+.venv/
+venv/
+env/
+
+# Test / coverage output
+.coverage
+htmlcov/
+
+# Generated experiment output (CSVs and plots) - reproducible with collect_all.py.
+# The folder itself is kept via results/.gitkeep.
+results/*
+!results/.gitkeep
+# To commit a final run for the report, uncomment:
+# !results/main/
+
+# Notebooks
+.ipynb_checkpoints/
+
+# Editors / OS
+.vscode/
+.idea/
+*.swp
+.DS_Store
+Thumbs.db
