@@ -1,0 +1,16 @@
+source,game,rows,columns,published,exact,reference,nodes,seconds,reference_seconds,solved,exact_status,result
+U2020-T1,Cram,2,2,second,second,second,9,1.0875053703784943e-05,5.2749994210898876e-05,True,completed,PASS
+U2020-T1,Cram,2,4,second,second,second,70,3.762502456083894e-05,0.0006157919997349381,True,completed,PASS
+U2020-T1,Cram,4,4,second,second,not_run_size,7832,0.004166750004515052,,True,completed,PASS
+U2020-T2,Cram,2,3,first,first,first,18,1.654098741710186e-05,6.866699550300837e-05,True,completed,PASS
+U2020-T2,Cram,3,2,first,first,first,10,1.7167010810226202e-05,0.00012883299496024847,True,completed,PASS
+U2020-T2,Cram,3,4,first,first,first,217,0.0001308330101892352,0.00374625000404194,True,completed,PASS
+L2002,Domineering,2,2,first,first,first,2,8.04202863946557e-06,2.5500019546598196e-05,True,completed,PASS
+L2002,Domineering,2,3,first,first,first,4,1.0207993909716606e-05,3.245903644710779e-05,True,completed,PASS
+L2002,Domineering,2,4,second,second,second,16,1.7958052922040224e-05,8.837500354275107e-05,True,completed,PASS
+L2002,Domineering,2,5,first,first,first,34,2.9624963644891977e-05,0.00019145803526043892,True,completed,PASS
+L2002,Domineering,3,3,first,first,first,10,1.654197694733739e-05,6.662501255050302e-05,True,completed,PASS
+L2002,Domineering,3,4,second,second,second,150,9.041698649525642e-05,0.0008671249961480498,True,completed,PASS
+L2002,Domineering,4,3,first,first,first,36,3.300001844763756e-05,0.00023545802105218172,True,completed,PASS
+L2002,Domineering,4,4,first,first,not_run_size,710,0.000549832999240607,,True,completed,PASS
+L2002,Domineering,5,5,second,second,not_run_size,234578,0.13993462501093745,,True,completed,PASS

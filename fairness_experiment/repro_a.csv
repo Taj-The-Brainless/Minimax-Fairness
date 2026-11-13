@@ -1,0 +1,13 @@
+game,width,height,shapes,partisan,pie,memory,depth,evaluation,random_opening,base_seed,match_index,match_seed,first_seat,first_wins,side0_wins,plies,swapped,seconds,status
+cram,4,4,domino,False,False,off,1,zero,0,20261113,0,3625445728931268075,A,0,0,6,0,0.00014283,ok
+cram,4,4,domino,False,False,off,1,zero,0,20261113,1,2033493691688070904,B,1,1,7,0,0.00012600,ok
+cram,4,4,domino,False,False,off,1,zero,0,20261113,2,11902447388810260344,A,0,0,6,0,0.00011921,ok
+cram,4,4,domino,False,False,off,2,zero,0,20261113,0,3625445728931268075,A,0,0,6,0,0.00124983,ok
+cram,4,4,domino,False,False,off,2,zero,0,20261113,1,2033493691688070904,B,1,1,7,0,0.00125954,ok
+cram,4,4,domino,False,False,off,2,zero,0,20261113,2,11902447388810260344,A,1,1,7,0,0.00128513,ok
+domineering,4,4,domino,True,False,off,1,mobility,0,20261113,0,3625445728931268075,A,0,0,8,0,0.00007646,ok
+domineering,4,4,domino,True,False,off,1,mobility,0,20261113,1,2033493691688070904,B,0,0,8,0,0.00006796,ok
+domineering,4,4,domino,True,False,off,1,mobility,0,20261113,2,11902447388810260344,A,0,0,8,0,0.00007187,ok
+domineering,4,4,domino,True,False,off,2,mobility,0,20261113,0,3625445728931268075,A,0,0,8,0,0.00035804,ok
+domineering,4,4,domino,True,False,off,2,mobility,0,20261113,1,2033493691688070904,B,1,1,7,0,0.00035142,ok
+domineering,4,4,domino,True,False,off,2,mobility,0,20261113,2,11902447388810260344,A,0,0,8,0,0.00034300,ok
