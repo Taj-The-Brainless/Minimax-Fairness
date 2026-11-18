@@ -1,0 +1,610 @@
+diff --git a/collect_final.py b/collect_final.py
+new file mode 100644
+index 0000000..07677a8
+--- /dev/null
++++ b/collect_final.py
+@@ -0,0 +1,135 @@
++"""Collect the data for the final analysis: long run, resumable, time-budgeted, most important first.
++
++    python collect_final.py                       # up to 170 minutes -> results/final (log: run.log)
++    python collect_final.py --budget-minutes 60   # shorter run
++    python collect_final.py --tiers core,rules    # only some tiers
++    python collect_final.py --random-opening 2 --out results/final_ro2 --tiers core   # sensitivity run
++
++On a Mac, keep the laptop awake:   caffeinate -i python collect_final.py
++
++It runs the variant groups ("tiers") in priority order. Inside a tier, small boards come first, so if
++the time budget ends, you have complete results for the small and medium boards. If it stops for any
++reason (Ctrl-C, closed laptop, budget), run the SAME command again: finished variants are skipped.
++Use the same settings (--games, --random-opening, --node-limit) within one --out folder.
++
++Tiers (priority order):
++  core   boards 2..5 x 2..5; domino / domino+i3 / domino+l3; impartial and partisan;
++         memory off and per_player (stuck = lose)
++  rules  same boards; shared memory, no_repeat, no_repeat_shared, per_player with stuck = reset,
++         and misere play
++  big    boards up to 6x6 (exact solving may hit the node limit; matches are still played)
++  extra  more tile shapes (i4, t4, l4, o4 with domino) on boards 3..5 x 3..5   (not run by default)
++  pie    the pie rule on the core variants (not run by default; see docs/FINAL_DECISIONS.md)
++
++Progress: every variant prints a "starting" and a "done" line with times; the same lines go to
++<out>/run.log. After each tier a short summary is logged.
++"""
++import argparse
++import os
++import sys
++import time
++from dataclasses import replace
++
++sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "src"))
++
++from pfair import analysis                                  # noqa: E402
++from pfair.experiments import Config, make_grid, run_grid, _read_csv   # noqa: E402
++
++SMALL = [(w, h) for w in range(2, 6) for h in range(2, 6)]
++MID = [(w, h) for w in range(3, 6) for h in range(3, 6)]
++BIG = [(2, 6), (6, 2), (3, 6), (6, 3), (4, 6), (6, 4), (5, 6), (6, 5), (6, 6)]
++THREE = [("domino",), ("domino", "i3"), ("domino", "l3")]
++EXTRA = [("domino", "i4"), ("domino", "t4"), ("domino", "l4"), ("domino", "o4")]
++
++
++def by_cost(variants):
++    return sorted(variants, key=lambda v: (v.width * v.height, v.vid()))
++
++
++def build_tiers(games):
++    """name -> (variants, per-variant timeout in seconds, Config overrides)"""
++    return {
++        "core": (by_cost(make_grid(SMALL, THREE, memory=("off", "per_player"))), 900, {}),
++        "rules": (by_cost(make_grid(SMALL, THREE, memory=("shared", "no_repeat", "no_repeat_shared"))
++                          + make_grid(SMALL, THREE, memory=("per_player",), memory_stuck="reset")
++                          + make_grid(SMALL, THREE, misere=(True,))), 900, {}),
++        # big boards: matches are expensive, so fewer games and shallower depths (the games column
++        # in matches.csv says how many games each row used)
++        "big": (by_cost(make_grid(BIG, THREE, memory=("off", "per_player"))), 900,
++                {"n_games": min(games, 60), "match_depths": (1, 2, 3)}),
++        "extra": (by_cost(make_grid(MID, EXTRA)), 600, {}),
++        "pie": (by_cost(make_grid(SMALL, THREE, pie=(True,))), 900, {}),
++    }
++
++
++p = argparse.ArgumentParser()
++p.add_argument("--out", default=os.path.join("results", "final"))
++p.add_argument("--tiers", default="core,rules,big")
++p.add_argument("--budget-minutes", type=float, default=170)
++p.add_argument("--games", type=int, default=200, help="games per variant, evaluation and depth")
++p.add_argument("--random-opening", type=int, default=0,
++               help="number of random plies at the start of each match game (0 = none)")
++p.add_argument("--node-limit", type=int, default=5_000_000, help="exact-solve node limit")
++p.add_argument("--no-unsolved-matches", action="store_true",
++               help="skip matches for variants the exact solver could not solve")
++p.add_argument("--fresh", action="store_true", help="ignore existing results in --out")
++args = p.parse_args()
++
++tiers = build_tiers(args.games)
++chosen = [t.strip() for t in args.tiers.split(",") if t.strip()]
++for t in chosen:
++    if t not in tiers:
++        sys.exit(f"unknown tier {t!r}; choose from {sorted(tiers)}")
++
++cfg = Config(node_limit=args.node_limit, depth_node_limit=2_000_000,
++             no_tt_baseline=True, no_tt_node_limit=300_000,
++             evals=("zero", "mobility"), match_depths=(1, 2, 3, 4),
++             n_games=args.games, random_opening=args.random_opening, seed=0,
++             matches_unsolved=not args.no_unsolved_matches)
++
++os.makedirs(args.out, exist_ok=True)
++LOG_PATH = os.path.join(args.out, "run.log")
++
++
++def log(msg=""):
++    line = f"[{time.strftime('%H:%M:%S')}] {msg}"
++    print(line, flush=True)
++    with open(LOG_PATH, "a") as f:
++        f.write(line + "\n")
++
++
++with open(os.path.join(args.out, "RUN_SETTINGS.txt"), "w") as f:
++    f.write(f"command: {' '.join(sys.argv)}\n{cfg}\n")
++
++start = time.perf_counter()
++budget = args.budget_minutes * 60
++log(f"start: tiers={chosen}, budget={args.budget_minutes:.0f} min, games={args.games}, out={args.out}")
++for i, name in enumerate(chosen):
++    variants, timeout, overrides = tiers[name]
++    remaining = budget - (time.perf_counter() - start)
++    if remaining <= 0:
++        log(f"time budget used up before tier {name!r}; rerun the same command to continue")
++        break
++    log(f"== tier {name}: {len(variants)} variants, {remaining / 60:.0f} min of budget left")
++    # --fresh only applies to the first tier, otherwise it would erase the tiers already collected
++    run_grid(variants, replace(cfg, **overrides), args.out, progress=log,
++             resume=(not args.fresh) or i > 0, max_seconds=remaining, variant_timeout=timeout)
++    ids = {v.vid() for v in variants}
++    rows = [r for r in _read_csv(os.path.join(args.out, "exact.csv")) if r["variant_id"] in ids]
++    log(f"== tier {name}: {len(rows)}/{len(variants)} variants recorded "
++        f"({sum(r['winner'] == 'timeout' for r in rows)} timeouts), "
++        f"{(time.perf_counter() - start) / 60:.1f} min elapsed")
++
++rows = _read_csv(os.path.join(args.out, "exact.csv"))
++log(f"finished a pass: {len(rows)} variants in {args.out}/exact.csv "
++    f"({sum(r['winner'] == 'timeout' for r in rows)} timeouts, "
++    f"{sum(str(r['solved']) == 'False' and r['winner'] != 'timeout' for r in rows)} unsolved)")
++wanted = sum(len(tiers[t][0]) for t in chosen)
++if len(rows) < wanted:
++    log(f"{wanted - len(rows)} variants of the chosen tiers are still missing: rerun the same command.")
++try:
++    analysis.main(args.out)
++    log(f"basic plots written to {args.out}")
++except Exception as exc:          # the data is already saved; plots can be redone later
++    log(f"data saved, but plotting failed: {exc!r}")
++log("next: python final_analysis.py --dir " + args.out)
+diff --git a/docs/FINAL_DECISIONS.md b/docs/FINAL_DECISIONS.md
+new file mode 100644
+index 0000000..7af5059
+--- /dev/null
++++ b/docs/FINAL_DECISIONS.md
+@@ -0,0 +1,24 @@
++# Final decisions for the experiment and the report
++
++These settle the DECIDE items in `rules.md` for the final run. Say them on a slide or in the report.
++
++| Item | Decision | Why |
++|---|---|---|
++| Memory rule, stuck case | `lose` is the main setting; `reset` is run as a comparison (tier `rules`) | one clear rule; the alternative is checked |
++| Pie rule | not run in the final grid; reported as theory only | under perfect play the second seat always wins, so exact solving adds nothing; its practical model (balanced first move) is still a modelling choice |
++| Evaluation functions | `zero` and `mobility` only | `parity` was a placeholder; `mobility` carries no information in Cram-like variants (identical to `zero`) |
++| Misère, no-repeat memory | exploratory results (tier `rules`) | implemented and tested against the reference solver |
++| Extra tile shapes (i4, t4, l4, o4) | implemented and tested, but not in the default final run (tier `extra`) | keeps the main claims on the best-checked variants |
++| Mirror / symmetry | `symmetry.py` proves pairing strategies and labels variants (`mirror_proved`); not removed from the data | those variants are where "balanced in practice" means "weak search", so they are reported separately |
++| General mirror-strategy player | not implemented (future work) | the checker already tells us where the strategy exists |
++
++## How fairness is judged
++- Practical fairness = first player's win rate between equal-depth players (same evaluation, random tie-breaking), 95% Wilson interval.
++- "balanced" = the interval contains 0.5. (A rule like "inside 45%-55%" cannot be met with 200 games: the interval is about +-7 points.)
++- Always read it as "balanced against depth-limited players"; a variant with a proved pairing strategy can look balanced and still be decided by a simple strategy.
++- Compare variants at the same depth (default depth 3, which exists for every tier) and stratify by board size and parity before comparing rules.
++
++## Limits to state
++- Boards up to 6x6; larger or harder variants hit the node limit (unsolved) or the per-variant timeout, and no exact winner exists for them (their practical fairness is still measured).
++- Results depend on the evaluation function and on random tie-breaking.
++- Solved variants are the smaller ones, which biases accuracy statements toward smaller boards.
+diff --git a/final_analysis.py b/final_analysis.py
+new file mode 100644
+index 0000000..54018d9
+--- /dev/null
++++ b/final_analysis.py
+@@ -0,0 +1,274 @@
++"""Final analysis: readable figures, a per-variant fairness table and a text summary.
++
++    python final_analysis.py                              # reads results/final, writes results/final/report/
++    python final_analysis.py --dir results/final --depth 3 --eval mobility
++
++Reads exact.csv, matches.csv, dstar.csv (written by collect_final.py). Pie variants are left out
++(their exact result is the base game's). Every figure is made separately, so one failing figure does
++not stop the others.
++
++How "balanced" is decided: the 95% interval of the first player's win rate (from the matches at the
++chosen depth) contains 0.5. "first-favoured" / "second-favoured" mean the interval lies above / below 0.5.
++This says "balanced against depth-limited players", not "balanced against every player".
++"""
++import argparse
++import os
++import re
++
++import matplotlib
++
++matplotlib.use("Agg")
++import matplotlib.pyplot as plt                     # noqa: E402
++import pandas as pd                                  # noqa: E402
++from matplotlib.patches import Rectangle             # noqa: E402
++
++p = argparse.ArgumentParser()
++p.add_argument("--dir", default=os.path.join("results", "final"))
++p.add_argument("--out", default=None, help="default: <dir>/report")
++p.add_argument("--depth", type=int, default=3,
++               help="search depth of the matches used for fairness (3 exists for every tier)")
++p.add_argument("--eval", default="mobility", help="evaluation function of the matches used")
++args = p.parse_args()
++OUT = args.out or os.path.join(args.dir, "report")
++os.makedirs(OUT, exist_ok=True)
++
++
++def as_bool(s):
++    return s.map(lambda x: str(x).strip().lower() == "true")
++
++
++def family(r):
++    base = "plain" if r.memory == "off" else f"{r.memory}-{r.memory_stuck}"
++    return ("misere, " if r.misere else "") + base
++
++
++def prep_exact(exact):
++    e = exact.copy()
++    for c in ("partisan", "pie", "misere", "mirror_proved"):
++        e[c] = as_bool(e[c]) if c in e else False
++    e = e[~e["pie"]].copy()
++    e["cells"] = e["width"] * e["height"]
++    e["family"] = e.apply(family, axis=1)
++    e["exact_winner"] = e["winner"].map(lambda w: w if w in ("first", "second", "timeout") else "unsolved")
++    e["kind"] = e["partisan"].map({True: "Domineering-like", False: "Cram-like"})
++    return e
++
++
++def with_practical(e, matches, depth, ev):
++    m = matches[(matches["depth"] == depth) & (matches["eval"] == ev)]
++    cols = ["variant_id", "games", "side0_rate", "side0_ci_low", "side0_ci_high"]
++    d = e.merge(m[cols], on="variant_id", how="left")
++
++    def verdict(r):
++        if pd.isna(r["side0_rate"]):
++            return "no data"
++        if r["side0_ci_low"] > 0.5:
++            return "first-favoured"
++        if r["side0_ci_high"] < 0.5:
++            return "second-favoured"
++        return "balanced"
++
++    def relation(r):
++        if r["exact_winner"] not in ("first", "second") or r["verdict"] == "no data":
++            return "n/a"
++        if r["verdict"] == "balanced":
++            return "theory decides, practice balanced"
++        agrees = (r["verdict"] == "first-favoured") == (r["exact_winner"] == "first")
++        return "practice agrees with theory" if agrees else "practice contradicts theory"
++
++    d["verdict"] = d.apply(verdict, axis=1)
++    d["relation"] = d.apply(relation, axis=1)
++    return d
++
++
++def _save(fig, name):
++    fig.tight_layout()
++    fig.savefig(os.path.join(OUT, name), dpi=150)
++    plt.close(fig)
++
++
++def _draw(ax, gg, kind):
++    cmap = plt.get_cmap("coolwarm")
++    for r in gg.itertuples():
++        edge, lw, tcol = "white", 1, "black"
++        if kind == "exact":
++            col = {"first": "#4C78A8", "second": "#F58518",
++                   "unsolved": "#BBBBBB", "timeout": "#777777"}[r.exact_winner]
++            txt = {"first": "1", "second": "2", "unsolved": "?", "timeout": "T"}[r.exact_winner]
++            txt += "*" if r.mirror_proved else ""
++        elif r.verdict == "no data":
++            col, txt = "#EEEEEE", ""
++        else:
++            col, txt = cmap(r.side0_rate), f"{r.side0_rate:.2f}"
++            if r.verdict == "balanced":
++                edge, lw = "black", 2.5
++            if r.side0_rate < 0.15 or r.side0_rate > 0.85:
++                tcol = "white"
++        ax.add_patch(Rectangle((r.width - 0.5, r.height - 0.5), 1, 1,
++                               facecolor=col, edgecolor=edge, linewidth=lw))
++        ax.text(r.width, r.height, txt, ha="center", va="center", fontsize=8, color=tcol)
++    ax.set_xlim(1.5, 6.5)
++    ax.set_ylim(6.5, 1.5)
++    ax.set_xticks(range(2, 7))
++    ax.set_yticks(range(2, 7))
++    ax.set_xlabel("width (columns)")
++    ax.set_ylabel("height (rows)")
++    ax.set_aspect("equal")
++
++
++def board_pages(d, kind, depth, ev):
++    """One image per rule family; one panel per (Cram/Domineering-like, shape set)."""
++    for fam, g in d.groupby("family"):
++        panels = sorted(g.groupby(["partisan", "shapes"]), key=lambda kv: (kv[0][0], kv[0][1]))
++        cols = min(3, len(panels))
++        rows = (len(panels) + cols - 1) // cols
++        fig, axes = plt.subplots(rows, cols, figsize=(4.4 * cols, 4.8 * rows), squeeze=False)
++        for ax in axes.flat:
++            ax.axis("off")
++        for ax, ((par, shapes), gg) in zip(axes.flat, panels):
++            ax.axis("on")
++            _draw(ax, gg, kind)
++            ax.set_title(f"{'Domineering' if par else 'Cram'}-like: {shapes}", fontsize=10)
++        if kind == "exact":
++            fig.suptitle(f"Exact winner under perfect play - rule family: {fam}\n"
++                         "1 = first player, 2 = second, ? = unsolved, T = timeout, * = pairing strategy proved",
++                         fontsize=10)
++            prefix = "exact_winner"
++        else:
++            fig.suptitle(f"First player's win rate between depth-{depth} players ({ev} evaluation) - {fam}\n"
++                         "red = first player wins more, blue = second; black border = balanced "
++                         "(interval contains 0.5)", fontsize=10)
++            prefix = "practical_balance"
++        _save(fig, f"{prefix}_{re.sub('[^A-Za-z0-9]+', '_', fam).strip('_')}.png")
++
++
++def theory_vs_practice(d, depth, ev):
++    ok = d[d["exact_winner"].isin(["first", "second"]) & (d["verdict"] != "no data")]
++    rows = ["first", "second"]
++    cols = ["first-favoured", "balanced", "second-favoured"]
++    fig, axes = plt.subplots(1, 2, figsize=(11, 4))
++    for ax, (flag, title) in zip(axes, [(False, "no pairing strategy proved"),
++                                        (True, "pairing strategy proved (mirror)")]):
++        sub = ok[ok["mirror_proved"] == flag]
++        tab = pd.crosstab(sub["exact_winner"], sub["verdict"]).reindex(index=rows, columns=cols, fill_value=0)
++        ax.imshow(tab.values, cmap="Blues")
++        ax.set_xticks(range(3))
++        ax.set_xticklabels([f"practice:\n{c}" for c in cols], fontsize=9)
++        ax.set_yticks(range(2))
++        ax.set_yticklabels([f"exact: {r} wins" for r in rows])
++        for i in range(2):
++            for j in range(3):
++                ax.text(j, i, int(tab.values[i, j]), ha="center", va="center", fontsize=14)
++        ax.set_title(f"{title} (n={len(sub)})", fontsize=10)
++    fig.suptitle(f"Theory vs practice at depth {depth} ({ev}): diagonal-style cells = practice agrees; "
++                 "middle column = theory decides but players look balanced", fontsize=9)
++    _save(fig, "theory_vs_practice.png")
++
++
++def size_trend(d, depth, ev):
++    x = d[(d["verdict"] != "no data") & (~d["mirror_proved"])].copy()
++    labels = ["4-9 cells", "10-16 cells", "17-25 cells", "26-36 cells"]
++    x["bucket"] = pd.cut(x["cells"], bins=[0, 9, 16, 25, 40], labels=labels)
++    x["is_balanced"] = (x["verdict"] == "balanced").astype(float)
++    x["gap"] = (x["side0_rate"] - 0.5).abs()
++    cnt = x.groupby(["bucket", "kind"], observed=False).size().unstack(fill_value=0)
++    share = x.groupby(["bucket", "kind"], observed=False)["is_balanced"].mean().unstack()
++    gap = x.groupby(["bucket", "kind"], observed=False)["gap"].mean().unstack()
++    fig, axes = plt.subplots(1, 2, figsize=(11, 4))
++    share.plot(kind="bar", ax=axes[0], rot=0)
++    axes[0].set_ylabel("share of variants that look balanced")
++    axes[0].set_ylim(0, 1)
++    gap.plot(kind="bar", ax=axes[1], rot=0)
++    axes[1].set_ylabel("mean |first-player win rate - 0.5|")
++    for ax in axes:
++        ax.set_xlabel("board size")
++        ax.set_xticklabels([f"{b}\n(n={int(cnt.loc[b].sum())})" for b in cnt.index], fontsize=8)
++    fig.suptitle(f"Does play get closer to fair on bigger boards? depth {depth}, {ev}, "
++                 "variants without a proved pairing strategy", fontsize=9)
++    _save(fig, "balance_vs_board_size.png")
++
++
++def dstar_curves(dstar, e):
++    ds = dstar.copy()
++    ds = ds[ds["status"] == "ok"]
++    ds["d_star"] = pd.to_numeric(ds["d_star"], errors="coerce")
++    ds = ds.dropna(subset=["d_star"])
++    ds = ds.drop(columns=[c for c in ("kind",) if c in ds.columns]).merge(
++        e[["variant_id", "kind"]], on="variant_id", how="inner")
++    ds = ds[~((ds["kind"] == "Cram-like") & (ds["eval"] != "zero"))]   # impartial: mobility == zero
++    maxd = int(ds["d_star"].max())
++    fig, ax = plt.subplots(figsize=(7, 4.5))
++    for (ev, kind), g in ds.groupby(["eval", "kind"]):
++        xs = list(range(1, maxd + 1))
++        ax.step(xs, [(g["d_star"] <= k).mean() for k in xs], where="post", label=f"{kind}, {ev} (n={len(g)})")
++    ax.set_xlabel("search depth d (plies)")
++    ax.set_ylabel("share of solved variants with settling depth d* <= d")
++    ax.set_ylim(0, 1.02)
++    ax.legend(fontsize=8)
++    ax.set_title("How deep must depth-limited search look to predict the exact winner?", fontsize=10)
++    _save(fig, "settling_depth.png")
++    return ds
++
++
++def fairness_table(d, ds):
++    t = d.copy()
++    t["board"] = t["width"].astype(str) + "x" + t["height"].astype(str)
++    if ds is not None and len(ds):
++        piv = ds.pivot_table(index="variant_id", columns="eval", values="d_star", aggfunc="first")
++        piv.columns = [f"d_star_{c}" for c in piv.columns]
++        t = t.merge(piv, left_on="variant_id", right_index=True, how="left")
++    keep = ["variant_id", "board", "cells", "kind", "shapes", "family", "exact_winner", "mirror_proved",
++            "mirror_winner", "nodes"] + [c for c in t.columns if c.startswith("d_star_")] + [
++            "games", "side0_rate", "side0_ci_low", "side0_ci_high", "verdict", "relation"]
++    keep = [c for c in keep if c in t.columns]
++    t = t[keep].sort_values(["family", "kind", "shapes", "cells", "board"])
++    t.to_csv(os.path.join(OUT, "fairness_table.csv"), index=False)
++    return t
++
++
++def summary(d, t):
++    lines = []
++    n = len(d)
++    lines.append(f"variants (without pie): {n}")
++    lines.append("exact result: " + ", ".join(f"{k}={v}" for k, v in d["exact_winner"].value_counts().items()))
++    lines.append(f"pairing strategy proved for {int(d['mirror_proved'].sum())} variants")
++    nm = d[~d["mirror_proved"] & d["exact_winner"].isin(["first", "second"])]
++    lines.append("without pairing strategy, solved: " +
++                 ", ".join(f"{k}={v}" for k, v in nm["exact_winner"].value_counts().items()))
++    lines.append(f"\nmatches used: depth {args.depth}, eval {args.eval}; "
++                 f"variants with match data: {int((d['verdict'] != 'no data').sum())}")
++    lines.append("verdicts: " + ", ".join(f"{k}={v}" for k, v in d["verdict"].value_counts().items()))
++    lines.append("relation to theory: " + ", ".join(f"{k}={v}" for k, v in d["relation"].value_counts().items()))
++    sub = d[(d["relation"] == "theory decides, practice balanced") & (~d["mirror_proved"])]
++    lines.append(f"\n'theory decides but practice looks balanced' without a proved pairing strategy: {len(sub)}")
++    for r in sub.sort_values("cells", ascending=False).head(15).itertuples():
++        lines.append(f"  {r.variant_id}: exact {r.exact_winner}, first-player rate {r.side0_rate:.2f} "
++                     f"[{r.side0_ci_low:.2f}, {r.side0_ci_high:.2f}]")
++    text = "\n".join(lines)
++    with open(os.path.join(OUT, "summary.txt"), "w") as f:
++        f.write(text + "\n")
++    print(text)
++
++
++def safe(name, fn, *a):
++    try:
++        return fn(*a)
++    except Exception as exc:                # keep going: the other outputs are independent
++        print(f"[skipped] {name}: {exc!r}")
++        return None
++
++
++exact = pd.read_csv(os.path.join(args.dir, "exact.csv"))
++matches = pd.read_csv(os.path.join(args.dir, "matches.csv"))
++dstar_raw = pd.read_csv(os.path.join(args.dir, "dstar.csv"))
++e = prep_exact(exact)
++d = with_practical(e, matches, args.depth, args.eval)
++
++safe("exact winner pages", board_pages, d, "exact", args.depth, args.eval)
++safe("practical balance pages", board_pages, d, "practical", args.depth, args.eval)
++safe("theory vs practice", theory_vs_practice, d, args.depth, args.eval)
++safe("balance vs size", size_trend, d, args.depth, args.eval)
++ds = safe("settling depth", dstar_curves, dstar_raw, e)
++table = safe("fairness table", fairness_table, d, ds)
++safe("summary", summary, d, table)
++print(f"\nfigures, fairness_table.csv and summary.txt are in {OUT}")
+diff --git a/src/pfair/analysis.py b/src/pfair/analysis.py
+index a3fc9e1..b6e61da 100644
+--- a/src/pfair/analysis.py
++++ b/src/pfair/analysis.py
+@@ -70,7 +70,7 @@ def plot3_cost(exact: pd.DataFrame, series: str = "memory"):
+ 
+ def plot4_scatter(matches: pd.DataFrame, depth: int):
+     """Plot 4 (Q2): exact winner vs practical first-player win rate, one dot per variant."""
+-    m = matches[matches["depth"] == depth]
++    m = matches[matches["depth"] == depth].dropna(subset=["theory_first_wins"])   # unsolved variants have no theory
+     fig, ax = plt.subplots()
+     ax.scatter(m["theory_first_wins"].astype(int), m["side0_rate"], alpha=0.6)
+     ax.set_xticks([0, 1], ["second wins (exact)", "first wins (exact)"])
+diff --git a/src/pfair/experiments.py b/src/pfair/experiments.py
+index a3c2ba8..410d8a7 100644
+--- a/src/pfair/experiments.py
++++ b/src/pfair/experiments.py
+@@ -8,6 +8,7 @@ from __future__ import annotations
+ import csv
+ import itertools
+ import os
++import signal
+ import time
+ from dataclasses import dataclass, field, replace
+ 
+@@ -68,6 +69,7 @@ class Config:
+     random_opening: int = 0
+     seed: int = 0
+     stages: tuple = ("exact", "depth", "matches")
++    matches_unsolved: bool = False       # also play matches on variants the exact solver could not solve
+ 
+ 
+ # ---- one variant ------------------------------------------------------------------------------
+@@ -118,14 +120,17 @@ def run_variant(variant: Variant, cfg: Config):
+                                "d_star_rel": (round(d_star / L, 4) if d_star else ""),
+                                "nodes_to_d_star": nodes_to, "exact_nodes": res.nodes,
+                                "winner": exact["winner"]})
+-    if res.solved and "matches" in cfg.stages:
++    if "matches" in cfg.stages and (res.solved or cfg.matches_unsolved):
+         for name in cfg.evals:
+             for d in cfg.match_depths:
+                 m = run_matches(rules, d, EVALS[name], cfg.n_games, cfg.seed, cfg.random_opening)
+-                match_rows.append({**base, "eval": name, "depth": d, **m,
+-                                   "theory_first_wins": res.first_wins,
+-                                   "theory_winner_rate": (m["side0_rate"] if res.first_wins
+-                                                          else 1 - m["side0_rate"])})
++                if res.solved:
++                    theory, theory_rate = res.first_wins, (m["side0_rate"] if res.first_wins
++                                                           else 1 - m["side0_rate"])
++                else:
++                    theory, theory_rate = "", ""      # no ground truth: practical fairness only
++                match_rows.append({**base, "eval": name, "depth": d, "solved": res.solved, **m,
++                                   "theory_first_wins": theory, "theory_winner_rate": theory_rate})
+     return exact, depth_rows, dstar_rows, match_rows
+ 
+ 
+@@ -152,12 +157,25 @@ def _read_csv(path: str) -> list:
+         return list(csv.DictReader(f))
+ 
+ 
+-def run_grid(variants, cfg: Config, out_dir: str = "results", progress=print, resume: bool = True):
++class VariantTimeout(Exception):
++    pass
++
++
++def _on_alarm(signum, frame):
++    raise VariantTimeout()
++
++
++def run_grid(variants, cfg: Config, out_dir: str = "results", progress=print, resume: bool = True,
++             max_seconds: float | None = None, variant_timeout: float | None = None):
+     """Run every variant and write exact/depth/dstar/matches CSVs into out_dir.
+ 
+     With resume=True (default), variants already present in out_dir/exact.csv are skipped, so a
+     stopped run can be restarted with the same command. Use a new --out folder (or delete the folder)
+     to start from scratch, and keep the same settings within one folder.
++
++    max_seconds: stop starting new variants after this many seconds (rerun to continue).
++    variant_timeout: abort a single variant after this many seconds (Unix only); it is recorded
++    in exact.csv as winner="timeout" and skipped on later runs.
+     """
+     paths = {n: os.path.join(out_dir, f"{n}.csv") for n in ("exact", "depth", "dstar", "matches")}
+     exact_rows, depth_rows, dstar_rows, match_rows = ([], [], [], [])
+@@ -169,14 +187,33 @@ def run_grid(variants, cfg: Config, out_dir: str = "results", progress=print, re
+     todo = [v for v in variants if v.vid() not in done]
+     if done:
+         progress(f"resuming: {len(done)} variants already done, {len(todo)} to go")
++    use_alarm = bool(variant_timeout) and hasattr(signal, "SIGALRM")
++    if use_alarm:
++        signal.signal(signal.SIGALRM, _on_alarm)
+     for i, v in enumerate(todo, 1):
+-        e, d, s, m = run_variant(v, cfg)
++        if max_seconds is not None and time.perf_counter() - t0 > max_seconds:
++            progress(f"time budget reached after {i - 1} variants; rerun the same command to continue")
++            break
++        t_v = time.perf_counter()
++        progress(f"[{i}/{len(todo)}] starting {v.vid()} ...")
++        try:
++            if use_alarm:
++                signal.alarm(int(variant_timeout))
++            e, d, s, m = run_variant(v, cfg)
++        except VariantTimeout:
++            progress(f"[{i}/{len(todo)}] {v.vid()}: TIMEOUT after {variant_timeout}s, skipped")
++            e = {"variant_id": v.vid(), **v.to_dict(), "solved": False, "winner": "timeout",
++                 "nodes": "", "seconds": variant_timeout}
++            d, s, m = [], [], []
++        finally:
++            if use_alarm:
++                signal.alarm(0)
+         exact_rows.append(e)
+         depth_rows += d
+         dstar_rows += s
+         match_rows += m
+         progress(f"[{i}/{len(todo)}] {v.vid()}: {e['winner']}, nodes={e['nodes']} "
+-                 f"({time.perf_counter() - t0:.1f}s)")
++                 f"({time.perf_counter() - t_v:.1f}s; {time.perf_counter() - t0:.0f}s total)")
+         # write after every variant so a crash or Ctrl-C loses nothing
+         for name, rows in (("exact", exact_rows), ("depth", depth_rows),
+                            ("dstar", dstar_rows), ("matches", match_rows)):
+diff --git a/tests/test_new_shapes.py b/tests/test_new_shapes.py
+new file mode 100644
+index 0000000..d787de5
+--- /dev/null
++++ b/tests/test_new_shapes.py
+@@ -0,0 +1,34 @@
++"""The tetromino shapes i4, l4, s4 (and t4, o4) against the independent reference solver on tiny boards."""
++import itertools
++
++from pfair.reference import reference_first_wins
++from pfair.rules import Rules, Variant
++from pfair.solver import solve_variant
++
++
++def _variants():
++    sizes = [(1, 5), (2, 4), (2, 3), (3, 3)]
++    shape_sets = [("domino", "i4"), ("domino", "l4"), ("domino", "s4"), ("i4", "t4"), ("l4", "s4")]
++    for (w, h), shapes, par, mem, mis in itertools.product(
++            sizes, shape_sets, (False, True), ("off", "no_repeat"), (False, True)):
++        v = Variant(w, h, shapes, partisan=par, memory=mem, misere=mis)
++        try:
++            Rules(v)
++        except ValueError:
++            continue
++        yield v
++
++
++def test_tetrominoes_match_reference():
++    count = 0
++    for v in _variants():
++        assert solve_variant(v).first_wins == reference_first_wins(v), v.vid()
++        count += 1
++    assert count > 40
++
++
++def test_each_tetromino_is_actually_used():
++    """Guards against a typo making a shape unplaceable everywhere (both copies of the table)."""
++    fits = {"i4": (1, 4), "l4": (2, 3), "s4": (2, 3), "t4": (2, 3), "o4": (2, 2)}
++    for name, (w, h) in fits.items():
++        assert len(Rules(Variant(w, h, (name,))).successors(Rules(Variant(w, h, (name,))).initial_state())) > 0, name

@@ -46,11 +46,15 @@ class ExactSolver:
             if cached is not None:
                 self.tt_hits += 1
                 return cached
-        result = False
-        for _, nxt in self.rules.successors(state):
-            if not self.wins(nxt):
-                result = True
-                break
+        succ = self.rules.successors(state)
+        if not succ:
+            result = self.rules.stuck_wins   # normal play: cannot place = loses; misere: wins
+        else:
+            result = False
+            for _, nxt in succ:
+                if not self.wins(nxt):
+                    result = True
+                    break
         if self.use_tt:
             self.tt[k] = result
         return result

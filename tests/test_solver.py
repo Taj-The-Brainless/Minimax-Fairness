@@ -3,7 +3,7 @@ import itertools
 import pytest
 
 from pfair.reference import reference_first_wins
-from pfair.rules import Variant
+from pfair.rules import Rules, Variant
 from pfair.solver import pie_second_player_always_wins, solve_variant
 
 
@@ -105,3 +105,38 @@ def test_stuck_modes_change_the_game_and_both_match_the_reference():
     assert first_wins(lose) != first_wins(reset)
     assert first_wins(lose) == reference_first_wins(lose)
     assert first_wins(reset) == reference_first_wins(reset)
+
+
+# ---- misere play ------------------------------------------------------------------------------
+def test_misere_by_hand():
+    assert first_wins(Variant(1, 1)) is False                 # normal play: cannot place = loses
+    assert first_wins(Variant(1, 1, misere=True)) is True     # misere: cannot place = wins
+    assert first_wins(Variant(2, 1)) is True                  # first places, second is stuck
+    assert first_wins(Variant(2, 1, misere=True)) is False
+    assert first_wins(Variant(2, 2)) is False                 # Cram 2x2: second player wins ...
+    assert first_wins(Variant(2, 2, misere=True)) is True     # ... but the first player in misere
+
+
+# ---- new rules: the fast solver must agree with the independent reference solver ----------------
+def new_rule_variants():
+    sizes = [(1, 5), (2, 2), (2, 3), (3, 2)]
+    shape_sets = [("domino",), ("mono", "domino"), ("domino", "i3"), ("domino", "t4"), ("o4", "domino")]
+    for (w, h), shapes, par, mem, stuck, mis in itertools.product(
+            sizes, shape_sets, (False, True), ("off", "per_player", "no_repeat", "no_repeat_shared"),
+            ("lose", "reset"), (False, True)):
+        if mem == "off" and stuck == "reset":
+            continue
+        v = Variant(w, h, shapes, partisan=par, memory=mem, memory_stuck=stuck, misere=mis)
+        try:
+            Rules(v)
+        except ValueError:                            # e.g. partisan with mono / o4
+            continue
+        yield v
+
+
+def test_new_rules_match_reference():
+    count = 0
+    for v in new_rule_variants():
+        assert first_wins(v) == reference_first_wins(v), v.vid()
+        count += 1
+    assert count > 150

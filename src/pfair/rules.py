@@ -8,9 +8,13 @@ Conventions (see docs/rules.md for the written decisions):
   * Side 0 moves first. In partisan (Domineering-like) variants, side 0 places
     vertical tiles and side 1 horizontal ones (swap with first_orientation="h").
   * State is a plain tuple (occupied_mask, side_to_move, mem0, mem1) for speed.
-  * Memory rule: a shape cannot be used again until every shape has been used once;
-    then the cycle resets. mem0/mem1 are bit masks over shapes already used in the
-    current cycle ("per_player": own mask per side; "shared": mem0 for both).
+  * Memory rule "per_player" / "shared": a shape cannot be used again until every shape has
+    been used once; then the cycle resets. mem0/mem1 are bit masks over shapes already used in
+    the current cycle ("per_player": own mask per side; "shared": mem0 for both).
+  * Memory rule "no_repeat" / "no_repeat_shared": a player may not place the same shape as their
+    own previous move ("no_repeat") or as the previous move of either player
+    ("no_repeat_shared"). mem0/mem1 then hold (last shape index + 1), 0 = no restriction.
+  * misere=True: the player who cannot place WINS (the last player to place loses).
 """
 from __future__ import annotations
 
@@ -18,10 +22,20 @@ from dataclasses import dataclass, asdict
 
 # Base cells (row, col) of each shape, in one orientation.
 SHAPES = {
+    "mono": ((0, 0),),                          # single cell (impartial variants only)
     "domino": ((0, 0), (1, 0)),
-    "i3": ((0, 0), (1, 0), (2, 0)),   # straight tromino
-    "l3": ((0, 0), (1, 0), (1, 1)),   # L-shaped tromino
+    "i3": ((0, 0), (1, 0), (2, 0)),             # straight tromino
+    "l3": ((0, 0), (1, 0), (1, 1)),             # L-shaped tromino
+    "i4": ((0, 0), (1, 0), (2, 0), (3, 0)),     # straight tetromino
+    "o4": ((0, 0), (0, 1), (1, 0), (1, 1)),     # square tetromino (impartial variants only)
+    "t4": ((0, 0), (0, 1), (0, 2), (1, 1)),     # T tetromino
+    "l4": ((0, 0), (1, 0), (2, 0), (2, 1)),     # L tetromino (rotations only, no mirror image)
+    "s4": ((0, 1), (0, 2), (1, 0), (1, 1)),     # S tetromino (rotations only, no mirror image)
 }
+
+NOREPEAT_MODES = ("no_repeat", "no_repeat_shared")
+SHARED_MODES = ("shared", "no_repeat_shared")
+MEMORY_MODES = ("off", "per_player", "shared") + NOREPEAT_MODES
 
 
 @dataclass(frozen=True)
@@ -33,7 +47,8 @@ class Variant:
     first_orientation: str = "v"    # partisan only: orientation of side 0 ("v" or "h")
     pie: bool = False               # second player may swap sides after the first move
     memory: str = "off"             # "off" | "per_player" | "shared"
-    memory_stuck: str = "lose"      # if only used shapes fit: "lose" or "reset" the cycle
+    memory_stuck: str = "lose"      # if only blocked shapes fit: "lose" or "reset" the restriction
+    misere: bool = False            # True: the player who cannot place wins
 
     def vid(self) -> str:
         """Short readable id used in result files."""
@@ -41,6 +56,8 @@ class Variant:
                  ("partisan-" + self.first_orientation) if self.partisan else "impartial"]
         if self.pie:
             parts.append("pie")
+        if self.misere:
+            parts.append("misere")
         if self.memory != "off":
             parts.append(f"mem-{self.memory}-{self.memory_stuck}")
         return "_".join(parts)
@@ -83,7 +100,7 @@ class Rules:
 
     def __init__(self, variant: Variant):
         v = variant
-        if v.memory not in ("off", "per_player", "shared"):
+        if v.memory not in MEMORY_MODES:
             raise ValueError(f"unknown memory mode {v.memory!r}")
         if v.memory_stuck not in ("lose", "reset"):
             raise ValueError(f"unknown memory_stuck {v.memory_stuck!r}")
@@ -100,6 +117,10 @@ class Rules:
         self.memory = v.memory
         self.stuck = v.memory_stuck
         self.mem_on = v.memory != "off"
+        self.shared_mem = v.memory in SHARED_MODES      # one memory slot for both sides
+        self.norepeat = v.memory in NOREPEAT_MODES      # memory = last shape, not a used-set
+        self.misere = v.misere
+        self.stuck_wins = v.misere                      # value of "no legal move" for the side to move
         self.areas = [len(SHAPES[n]) for n in v.shapes]
 
         # placements[side][shape_index] -> list of bit masks
@@ -143,7 +164,7 @@ class Rules:
         occ, side, m0, m1 = state
         if not self.mem_on:
             return (occ, side) if self._key_has_side else occ
-        if self.memory == "shared":
+        if self.shared_mem:
             return (occ, side, m0) if self._key_has_side else (occ, m0)
         return (occ, side, m0, m1)
 
@@ -156,7 +177,7 @@ class Rules:
         """List of (move, next_state); move = (shape_index, mask). Empty list = side to move loses."""
         occ, side, m0, m1 = state
         if self.mem_on:
-            slot = 0 if self.memory == "shared" else side
+            slot = 0 if self.shared_mem else side
             mem = m0 if slot == 0 else m1
         else:
             slot, mem = 0, 0
@@ -169,16 +190,24 @@ class Rules:
         occ, side, m0, m1 = state
         out = []
         own = self.placements[side]
+        mem_on, norepeat = self.mem_on, self.norepeat
         for s in range(self.n_shapes):
-            if mem >> s & 1:
-                continue
-            for mask in own[s]:
-                if mask & occ:
-                    continue
-                if self.mem_on:
+            nm = 0
+            if mem_on:
+                if norepeat:
+                    if mem == s + 1:          # same shape as the remembered last move
+                        continue
+                    nm = s + 1
+                else:
+                    if mem >> s & 1:          # shape already used in this cycle
+                        continue
                     nm = mem | (1 << s)
                     if nm == self.all_shapes_mask:
                         nm = 0
+            for mask in own[s]:
+                if mask & occ:
+                    continue
+                if mem_on:
                     nxt = (occ | mask, 1 - side, nm, m1) if slot == 0 else (occ | mask, 1 - side, m0, nm)
                 else:
                     nxt = (occ | mask, 1 - side, 0, 0)

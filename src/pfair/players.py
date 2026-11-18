@@ -1,7 +1,7 @@
 """Depth-limited alpha-beta (the "imperfect player"), settling depth d*, and matches.
 
 Values are from the point of view of the side to move (negamax). A position with no legal
-move is an exact loss (-WIN). At the depth limit, an evaluation function estimates the value.
+move is an exact loss (-WIN), or an exact win in misere variants. At the depth limit, an evaluation function estimates the value.
 """
 from __future__ import annotations
 
@@ -63,7 +63,7 @@ class DepthLimited:
             raise NodeLimitExceeded
         succ = self.rules.successors(state)
         if not succ:
-            return -WIN
+            return WIN if self.rules.stuck_wins else -WIN
         if depth <= 0:
             self.cutoffs += 1
             self.evals += 1
@@ -208,7 +208,8 @@ def play_game(rules: Rules, players, rng: random.Random, random_opening: int = 0
     while True:
         succ = rules.successors(state)
         if not succ:
-            loser_side = state[1]
+            stuck_side = state[1]
+            loser_side = (1 - stuck_side) if rules.stuck_wins else stuck_side
             break
         state = players[seat_of_side[state[1]]].choose(state)
         plies += 1

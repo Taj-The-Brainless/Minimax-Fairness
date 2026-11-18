@@ -70,7 +70,7 @@ def plot3_cost(exact: pd.DataFrame, series: str = "memory"):
 
 def plot4_scatter(matches: pd.DataFrame, depth: int):
     """Plot 4 (Q2): exact winner vs practical first-player win rate, one dot per variant."""
-    m = matches[matches["depth"] == depth]
+    m = matches[matches["depth"] == depth].dropna(subset=["theory_first_wins"])   # unsolved variants have no theory
     fig, ax = plt.subplots()
     ax.scatter(m["theory_first_wins"].astype(int), m["side0_rate"], alpha=0.6)
     ax.set_xticks([0, 1], ["second wins (exact)", "first wins (exact)"])

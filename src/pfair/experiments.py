@@ -8,27 +8,31 @@ from __future__ import annotations
 import csv
 import itertools
 import os
+import signal
 import time
 from dataclasses import dataclass, field, replace
 
 from .players import EVALS, depth_table, run_matches, settling_depth
 from .rules import Rules, Variant
 from .solver import solve_variant, pie_second_player_always_wins  # noqa: F401  (re-export)
+from .symmetry import analyze_mirror
 
 
 # ---- grids ----------------------------------------------------------------------------------
 def make_grid(sizes, shape_sets, partisan=(False, True), pie=(False,), memory=("off",),
-              memory_stuck="lose"):
-    """All valid combinations. Skips: partisan + L-tromino, memory with a single shape,
-    and square boards counted twice are kept (rows x columns differ in partisan games)."""
+              memory_stuck="lose", misere=(False,)):
+    """All valid combinations. Skips: partisan + shapes without a vertical AND a horizontal
+    orientation (l3, mono, o4), memory with a single shape; square boards counted twice are kept
+    (rows x columns differ in partisan games)."""
     out = []
-    for (w, h), shapes, par, pi, mem in itertools.product(sizes, shape_sets, partisan, pie, memory):
-        if par and "l3" in shapes:
+    for (w, h), shapes, par, pi, mem, mi in itertools.product(sizes, shape_sets, partisan, pie,
+                                                              memory, misere):
+        if par and any(name in ("l3", "mono", "o4") for name in shapes):
             continue
         if mem != "off" and len(shapes) < 2:
             continue
         out.append(Variant(w, h, tuple(shapes), partisan=par, pie=pi, memory=mem,
-                           memory_stuck=memory_stuck))
+                           memory_stuck=memory_stuck, misere=mi))
     return out
 
 
@@ -65,6 +69,7 @@ class Config:
     random_opening: int = 0
     seed: int = 0
     stages: tuple = ("exact", "depth", "matches")
+    matches_unsolved: bool = False       # also play matches on variants the exact solver could not solve
 
 
 # ---- one variant ------------------------------------------------------------------------------
@@ -82,10 +87,16 @@ def _cached_solve(variant: Variant, node_limit: int, use_tt: bool = True):
 def run_variant(variant: Variant, cfg: Config):
     """Returns (exact_row, depth_rows, dstar_rows, match_rows) for one variant."""
     rules = Rules(variant)
-    base = {"variant_id": variant.vid(), **variant.to_dict()}
+    mirror = analyze_mirror(variant, rules)
+    # label every row, so later analysis can separate variants with a simple pairing strategy
+    base = {"variant_id": variant.vid(), **variant.to_dict(),
+            "mirror_proved": mirror.applicable, "mirror_winner": mirror.winner or "",
+            "mirror_symmetry": mirror.symmetry or ""}
     L = rules.max_plies_bound()
 
     res = _cached_solve(variant, cfg.node_limit)
+    if mirror.applicable and res.solved and (mirror.winner == "first") != res.first_wins:
+        raise AssertionError(f"symmetry checker disagrees with the exact solver on {variant.vid()} (bug)")
     exact = {**base, "solved": res.solved,
              "first_wins": res.first_wins,
              "winner": ("first" if res.first_wins else "second") if res.solved else "unsolved",
@@ -109,14 +120,17 @@ def run_variant(variant: Variant, cfg: Config):
                                "d_star_rel": (round(d_star / L, 4) if d_star else ""),
                                "nodes_to_d_star": nodes_to, "exact_nodes": res.nodes,
                                "winner": exact["winner"]})
-    if res.solved and "matches" in cfg.stages:
+    if "matches" in cfg.stages and (res.solved or cfg.matches_unsolved):
         for name in cfg.evals:
             for d in cfg.match_depths:
                 m = run_matches(rules, d, EVALS[name], cfg.n_games, cfg.seed, cfg.random_opening)
-                match_rows.append({**base, "eval": name, "depth": d, **m,
-                                   "theory_first_wins": res.first_wins,
-                                   "theory_winner_rate": (m["side0_rate"] if res.first_wins
-                                                          else 1 - m["side0_rate"])})
+                if res.solved:
+                    theory, theory_rate = res.first_wins, (m["side0_rate"] if res.first_wins
+                                                           else 1 - m["side0_rate"])
+                else:
+                    theory, theory_rate = "", ""      # no ground truth: practical fairness only
+                match_rows.append({**base, "eval": name, "depth": d, "solved": res.solved, **m,
+                                   "theory_first_wins": theory, "theory_winner_rate": theory_rate})
     return exact, depth_rows, dstar_rows, match_rows
 
 
@@ -143,12 +157,25 @@ def _read_csv(path: str) -> list:
         return list(csv.DictReader(f))
 
 
-def run_grid(variants, cfg: Config, out_dir: str = "results", progress=print, resume: bool = True):
+class VariantTimeout(Exception):
+    pass
+
+
+def _on_alarm(signum, frame):
+    raise VariantTimeout()
+
+
+def run_grid(variants, cfg: Config, out_dir: str = "results", progress=print, resume: bool = True,
+             max_seconds: float | None = None, variant_timeout: float | None = None):
     """Run every variant and write exact/depth/dstar/matches CSVs into out_dir.
 
     With resume=True (default), variants already present in out_dir/exact.csv are skipped, so a
     stopped run can be restarted with the same command. Use a new --out folder (or delete the folder)
     to start from scratch, and keep the same settings within one folder.
+
+    max_seconds: stop starting new variants after this many seconds (rerun to continue).
+    variant_timeout: abort a single variant after this many seconds (Unix only); it is recorded
+    in exact.csv as winner="timeout" and skipped on later runs.
     """
     paths = {n: os.path.join(out_dir, f"{n}.csv") for n in ("exact", "depth", "dstar", "matches")}
     exact_rows, depth_rows, dstar_rows, match_rows = ([], [], [], [])
@@ -160,14 +187,33 @@ def run_grid(variants, cfg: Config, out_dir: str = "results", progress=print, re
     todo = [v for v in variants if v.vid() not in done]
     if done:
         progress(f"resuming: {len(done)} variants already done, {len(todo)} to go")
+    use_alarm = bool(variant_timeout) and hasattr(signal, "SIGALRM")
+    if use_alarm:
+        signal.signal(signal.SIGALRM, _on_alarm)
     for i, v in enumerate(todo, 1):
-        e, d, s, m = run_variant(v, cfg)
+        if max_seconds is not None and time.perf_counter() - t0 > max_seconds:
+            progress(f"time budget reached after {i - 1} variants; rerun the same command to continue")
+            break
+        t_v = time.perf_counter()
+        progress(f"[{i}/{len(todo)}] starting {v.vid()} ...")
+        try:
+            if use_alarm:
+                signal.alarm(int(variant_timeout))
+            e, d, s, m = run_variant(v, cfg)
+        except VariantTimeout:
+            progress(f"[{i}/{len(todo)}] {v.vid()}: TIMEOUT after {variant_timeout}s, skipped")
+            e = {"variant_id": v.vid(), **v.to_dict(), "solved": False, "winner": "timeout",
+                 "nodes": "", "seconds": variant_timeout}
+            d, s, m = [], [], []
+        finally:
+            if use_alarm:
+                signal.alarm(0)
         exact_rows.append(e)
         depth_rows += d
         dstar_rows += s
         match_rows += m
         progress(f"[{i}/{len(todo)}] {v.vid()}: {e['winner']}, nodes={e['nodes']} "
-                 f"({time.perf_counter() - t0:.1f}s)")
+                 f"({time.perf_counter() - t_v:.1f}s; {time.perf_counter() - t0:.0f}s total)")
         # write after every variant so a crash or Ctrl-C loses nothing
         for name, rows in (("exact", exact_rows), ("depth", depth_rows),
                            ("dstar", dstar_rows), ("matches", match_rows)):

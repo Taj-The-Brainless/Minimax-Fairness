@@ -17,7 +17,7 @@ def rotate(mask,width,height):
 
 def game(rules,depth,rng):
     v=rules.variant
-    if v.partisan or v.memory!='off' or v.pie or v.shapes!=('domino',) or v.width%2 or v.height%2:
+    if v.partisan or v.memory!='off' or v.pie or v.misere or v.shapes!=('domino',) or v.width%2 or v.height%2:
         raise ValueError('Only standard even-by-even Cram without pie or memory')
     first=Player(rules,depth,EVALS['zero'],rng);state=rules.initial_state(); plies=0;mirror_replies=0
     while True:

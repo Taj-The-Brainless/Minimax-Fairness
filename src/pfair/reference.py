@@ -2,16 +2,23 @@
 
 It shares NO code with rules.py / solver.py: its own shape tables, its own move
 generation on a set of occupied cells, plain minimax with no table and no pruning.
-Only usable on tiny boards. Handles the base game (the pie rule is not applied).
+Only usable on tiny boards. Handles the base game (the pie rule is not applied); supports misere and the
+no-repeat memory modes with its own, separate implementation.
 """
 from __future__ import annotations
 
 from .rules import Variant
 
 _BASE = {
+    "mono": [(0, 0)],
     "domino": [(0, 0), (1, 0)],
     "i3": [(0, 0), (1, 0), (2, 0)],
     "l3": [(0, 0), (1, 0), (1, 1)],
+    "i4": [(0, 0), (1, 0), (2, 0), (3, 0)],
+    "o4": [(0, 0), (0, 1), (1, 0), (1, 1)],
+    "t4": [(0, 0), (0, 1), (0, 2), (1, 1)],
+    "l4": [(0, 0), (1, 0), (2, 0), (2, 1)],
+    "s4": [(0, 1), (0, 2), (1, 0), (1, 1)],
 }
 
 
@@ -40,6 +47,8 @@ def reference_first_wins(variant: Variant) -> bool:
     shapes = list(variant.shapes)
     n = len(shapes)
     orients = [_rotations(_BASE[s]) for s in shapes]
+    shared = variant.memory in ("shared", "no_repeat_shared")
+    norepeat = variant.memory in ("no_repeat", "no_repeat_shared")
 
     def allowed_kinds(player):
         if not variant.partisan:
@@ -51,7 +60,7 @@ def reference_first_wins(variant: Variant) -> bool:
     def moves(occupied, player, mem):
         kinds = allowed_kinds(player)
         mem_on = variant.memory != "off"
-        used = mem[0 if variant.memory == "shared" else player] if mem_on else frozenset()
+        used = mem[0 if shared else player] if mem_on else frozenset()
 
         def gen(used_set):
             res = []
@@ -77,15 +86,20 @@ def reference_first_wins(variant: Variant) -> bool:
 
     def mover_wins(occupied, player, mem):
         found, used = moves(occupied, player, mem)
+        if not found:
+            return variant.misere          # cannot place: loses (normal play) / wins (misere)
         for si, cells in found:
             new_occ = occupied | frozenset(cells)
             if variant.memory == "off":
                 new_mem = mem
             else:
-                new_used = used | {si}
-                if len(new_used) == n:
-                    new_used = frozenset()
-                if variant.memory == "shared":
+                if norepeat:
+                    new_used = frozenset({si})          # remember only the last shape
+                else:
+                    new_used = used | {si}
+                    if len(new_used) == n:
+                        new_used = frozenset()
+                if shared:
                     new_mem = (frozenset(new_used), mem[1])
                 elif player == 0:
                     new_mem = (frozenset(new_used), mem[1])

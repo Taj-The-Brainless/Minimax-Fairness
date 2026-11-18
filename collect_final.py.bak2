@@ -1,0 +1,156 @@
+"""Collect the data for the final analysis: long run, resumable, time-budgeted, most important first.
+
+    python collect_final.py                       # up to 170 minutes -> results/final (log: run.log)
+    python collect_final.py --budget-minutes 60   # shorter run
+    python collect_final.py --tiers core,rules    # only some tiers
+    python collect_final.py --random-opening 2 --out results/final_ro2 --tiers core   # sensitivity run
+
+Faster: several processes at once (one --out folder per shard), then merge_results.py:
+    python collect_final.py --tiers big --shard 0/2 --out results/final_big0
+    python collect_final.py --tiers big --shard 1/2 --out results/final_big1
+Or run under PyPy (often several times faster for this pure-Python search):   pypy3 collect_final.py ...
+Other options: --match-depths 5,6   --max-cells 16   --stages exact,matches   (see batch commands in the notes)
+
+On a Mac, keep the laptop awake:   caffeinate -i python collect_final.py
+
+It runs the variant groups ("tiers") in priority order. Inside a tier, small boards come first, so if
+the time budget ends, you have complete results for the small and medium boards. If it stops for any
+reason (Ctrl-C, closed laptop, budget), run the SAME command again: finished variants are skipped.
+Use the same settings (--games, --random-opening, --node-limit) within one --out folder.
+
+Tiers (priority order):
+  core   boards 2..5 x 2..5; domino / domino+i3 / domino+l3; impartial and partisan;
+         memory off and per_player (stuck = lose)
+  rules  same boards; shared memory, no_repeat, no_repeat_shared, per_player with stuck = reset,
+         and misere play
+  big    boards up to 6x6 (exact solving may hit the node limit; matches are still played)
+  extra  more tile shapes (i4, t4, l4, o4 with domino) on boards 3..5 x 3..5   (not run by default)
+  pie    the pie rule on the core variants (not run by default; see docs/FINAL_DECISIONS.md)
+
+Progress: every variant prints a "starting" and a "done" line with times; the same lines go to
+<out>/run.log. After each tier a short summary is logged.
+"""
+import argparse
+import os
+import sys
+import time
+from dataclasses import replace
+
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "src"))
+
+from pfair.experiments import Config, make_grid, run_grid, _read_csv   # noqa: E402
+
+SMALL = [(w, h) for w in range(2, 6) for h in range(2, 6)]
+MID = [(w, h) for w in range(3, 6) for h in range(3, 6)]
+BIG = [(2, 6), (6, 2), (3, 6), (6, 3), (4, 6), (6, 4), (5, 6), (6, 5), (6, 6)]
+THREE = [("domino",), ("domino", "i3"), ("domino", "l3")]
+EXTRA = [("domino", "i4"), ("domino", "t4"), ("domino", "l4"), ("domino", "o4")]
+
+
+def by_cost(variants):
+    return sorted(variants, key=lambda v: (v.width * v.height, v.vid()))
+
+
+def build_tiers(games):
+    """name -> (variants, per-variant timeout in seconds, Config overrides)"""
+    return {
+        "core": (by_cost(make_grid(SMALL, THREE, memory=("off", "per_player"))), 900, {}),
+        "rules": (by_cost(make_grid(SMALL, THREE, memory=("shared", "no_repeat", "no_repeat_shared"))
+                          + make_grid(SMALL, THREE, memory=("per_player",), memory_stuck="reset")
+                          + make_grid(SMALL, THREE, misere=(True,))), 900, {}),
+        # big boards: matches are expensive, so fewer games and shallower depths (the games column
+        # in matches.csv says how many games each row used)
+        "big": (by_cost(make_grid(BIG, THREE, memory=("off", "per_player"))), 900,
+                {"n_games": games, "match_depths": (1, 2, 3, 4)}),
+        "extra": (by_cost(make_grid(MID, EXTRA)), 600, {}),
+        "pie": (by_cost(make_grid(SMALL, THREE, pie=(True,))), 900, {}),
+    }
+
+
+p = argparse.ArgumentParser()
+p.add_argument("--out", default=os.path.join("results", "final"))
+p.add_argument("--tiers", default="core,rules,big")
+p.add_argument("--budget-minutes", type=float, default=170)
+p.add_argument("--games", type=int, default=200, help="games per variant, evaluation and depth")
+p.add_argument("--random-opening", type=int, default=0,
+               help="number of random plies at the start of each match game (0 = none)")
+p.add_argument("--node-limit", type=int, default=5_000_000, help="exact-solve node limit")
+p.add_argument("--no-unsolved-matches", action="store_true",
+               help="skip matches for variants the exact solver could not solve")
+p.add_argument("--fresh", action="store_true", help="ignore existing results in --out")
+p.add_argument("--match-depths", default="1,2,3,4", help="search depths of the matches, comma separated")
+p.add_argument("--max-cells", type=int, default=0, help="only variants with at most this many cells (0 = all)")
+p.add_argument("--stages", default="exact,depth,matches",
+               help="e.g. exact,matches to skip the depth/d* stage (exact always runs, it is the ground truth)")
+p.add_argument("--shard", default="0/1",
+               help="K/N: run only every N-th variant (offset K) of each tier, so N processes can split the "
+                    "work. Give every shard its own --out folder, then combine with merge_results.py")
+args = p.parse_args()
+
+shard_k, shard_n = (int(x) for x in args.shard.split("/"))
+if not 0 <= shard_k < shard_n:
+    sys.exit("--shard must look like K/N with 0 <= K < N, e.g. 1/3")
+tiers = {name: ([x for x in v if not args.max_cells or x.width * x.height <= args.max_cells][shard_k::shard_n], t, o)
+         for name, (v, t, o) in build_tiers(args.games).items()}
+chosen = [t.strip() for t in args.tiers.split(",") if t.strip()]
+for t in chosen:
+    if t not in tiers:
+        sys.exit(f"unknown tier {t!r}; choose from {sorted(tiers)}")
+
+cfg = Config(node_limit=args.node_limit, depth_node_limit=2_000_000,
+             no_tt_baseline=True, no_tt_node_limit=300_000,
+             evals=("zero", "mobility"), match_depths=tuple(int(x) for x in args.match_depths.split(",")),
+             stages=tuple(args.stages.split(",")),
+             n_games=args.games, random_opening=args.random_opening, seed=0,
+             matches_unsolved=not args.no_unsolved_matches)
+
+os.makedirs(args.out, exist_ok=True)
+LOG_PATH = os.path.join(args.out, "run.log")
+
+
+def log(msg=""):
+    line = f"[{time.strftime('%H:%M:%S')}] {msg}"
+    print(line, flush=True)
+    with open(LOG_PATH, "a") as f:
+        f.write(line + "\n")
+
+
+with open(os.path.join(args.out, "RUN_SETTINGS.txt"), "w") as f:
+    f.write(f"command: {' '.join(sys.argv)}\n{cfg}\n")
+
+start = time.perf_counter()
+budget = args.budget_minutes * 60
+log(f"start: tiers={chosen}, budget={args.budget_minutes:.0f} min, games={args.games}, out={args.out}")
+for i, name in enumerate(chosen):
+    variants, timeout, overrides = tiers[name]
+    remaining = budget - (time.perf_counter() - start)
+    if remaining <= 0:
+        log(f"time budget used up before tier {name!r}; rerun the same command to continue")
+        break
+    log(f"== tier {name}: {len(variants)} variants, {remaining / 60:.0f} min of budget left")
+    # --fresh only applies to the first tier, otherwise it would erase the tiers already collected
+    overrides = dict(overrides)
+    if args.match_depths != "1,2,3,4":          # an explicit --match-depths beats the tier default
+        overrides.pop("match_depths", None)
+    run_grid(variants, replace(cfg, **overrides), args.out, progress=log,
+             resume=(not args.fresh) or i > 0, max_seconds=remaining, variant_timeout=timeout)
+    ids = {v.vid() for v in variants}
+    rows = [r for r in _read_csv(os.path.join(args.out, "exact.csv")) if r["variant_id"] in ids]
+    log(f"== tier {name}: {len(rows)}/{len(variants)} variants recorded "
+        f"({sum(r['winner'] == 'timeout' for r in rows)} timeouts), "
+        f"{(time.perf_counter() - start) / 60:.1f} min elapsed")
+
+rows = _read_csv(os.path.join(args.out, "exact.csv"))
+log(f"finished a pass: {len(rows)} variants in {args.out}/exact.csv "
+    f"({sum(r['winner'] == 'timeout' for r in rows)} timeouts, "
+    f"{sum(str(r['solved']) == 'False' and r['winner'] != 'timeout' for r in rows)} unsolved)")
+wanted = sum(len(tiers[t][0]) for t in chosen)
+if len(rows) < wanted:
+    log(f"{wanted - len(rows)} variants of the chosen tiers are still missing: rerun the same command.")
+try:
+    from pfair import analysis        # imported late: needs pandas/matplotlib, absent under PyPy
+    analysis.main(args.out)
+    log(f"basic plots written to {args.out}")
+except Exception as exc:          # the data is already saved; plots can be redone later
+    log(f"data saved, but plotting failed: {exc!r}")
+log("next: python final_analysis.py --dir " + args.out)

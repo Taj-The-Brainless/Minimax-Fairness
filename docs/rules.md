@@ -6,8 +6,15 @@ Everything marked **DECIDE** needs a team decision. Change the code and this fil
 - Players alternately place one tile on an empty board; the player who cannot place loses. No draws.
 - Side 0 moves first. Partisan (Domineering-like): side 0 places vertical tiles, side 1 horizontal
   (`first_orientation="h"` swaps this). Impartial (Cram-like): both sides may place any orientation.
-- Shapes: `domino`, `i3` (straight tromino), `l3` (L-tromino). `l3` is allowed only in impartial
-  variants (it has no vertical/horizontal orientation).
+- Shapes: `mono` (1 cell), `domino`, `i3` (straight tromino), `l3` (L-tromino), `i4`, `o4` (square),
+  `t4`, `l4`, `s4` (tetrominoes; `l4` and `s4` use rotations only, no mirror image).
+  Shapes with a square bounding box (`mono`, `l3`, `o4`) are allowed only in impartial variants,
+  because they have no vertical/horizontal orientation.
+- **Misère play** (`misere=True`): the player who cannot place WINS (the last player to place
+  loses). Default is normal play (the player who cannot place loses). The exact solver, the
+  depth-limited players and the matches all follow this flag; the evaluation functions do not.
+  **DECIDE:** `mobility` assumes "more moves is better", which is questionable in misère; either
+  accept that or use only `zero` for misère variants.
 
 ## Memory rule
 - A shape cannot be used again until every shape has been used once; then the cycle resets.
@@ -18,6 +25,11 @@ Everything marked **DECIDE** needs a team decision. Change the code and this fil
   The tests show the choice changes outcomes (e.g. 1x6 with domino + i3, per_player), so pick one
   for the main grid and state it in the report.
 - With a single shape, the memory rule changes nothing (reduction test).
+- **No-repeat rules** (`memory="no_repeat"` / `"no_repeat_shared"`): a player may not place the same
+  shape as their own previous move (`no_repeat`) or as the previous move of either player
+  (`no_repeat_shared`). They use the same `memory_stuck` setting: `lose` (cannot move, loses) or
+  `reset` (the restriction is lifted for that move). Needs 2+ shapes to be meaningful (with one
+  shape each player could place only once).
 
 ## Pie rule
 - After side 0's first move, the second *seat* may swap sides.
@@ -55,3 +67,21 @@ Everything marked **DECIDE** needs a team decision. Change the code and this fil
 ## Exact search limits
 - A variant that exceeds `node_limit` is `unsolved`: it is kept in `exact.csv` but excluded from
   depth and match experiments. Report the share of unsolved variants.
+
+## Symmetry (pairing) strategies: `pfair/symmetry.py`
+- `analyze_mirror(variant)` looks for a PROVED simple strategy in the base game: answer every
+  move with its mirror image (180-degree rotation, a mirror, or a diagonal mirror on square boards).
+  Two proofs: (1) second player pairs every first-player tile; (2) first player opens with a
+  symmetric tile, then pairs every reply. The result says the winner under perfect play.
+- `applicable = False` only means "no proof found". It does NOT mean the variant is fair or that
+  no simple strategy exists. The checker refuses misère play and memory rules that can stop the
+  reply from using the same shape (shared cycle with 2+ shapes, no-repeat, `reset` with a
+  per-player cycle). The pie rule is ignored (like the exact solver, the base game is analysed).
+- **Default handling: label, do not delete.** Every row in exact/depth/dstar/matches carries
+  `mirror_proved`, `mirror_winner`, `mirror_symmetry`. Variants with a proved pairing strategy are
+  exactly where a ~50% depth-limited win rate says "search is weak" and not "the variant is
+  fair", so report them as a separate group (or exclude them only from the fairness claim).
+  `collect_all.py --drop-mirror --out <other folder>` runs the grid without them, if you want the
+  filtered set as well.
+- Safety nets: `tests/test_symmetry.py` and `run_variant` both check that a claimed winner equals
+  the exact solver's result; a mismatch means a bug in the checker.
